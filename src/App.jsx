@@ -21,10 +21,11 @@ import {
   ShoppingCart,
   Cloud,
   CloudOff,
+  Pencil,
 } from 'lucide-react';
 
 const SUPABASE_URL = 'https://cyxyvcdjguslfhvcklhj.supabase.co';
-const SUPABASE_ANON_KEY = 'sb_publishable_4-gVdxwK6eBhszY5az-n7w_fiqjPEx7';
+const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY_HERE';
 
 const supabase = (SUPABASE_URL && SUPABASE_URL !== 'YOUR_SUPABASE_ANON_KEY_HERE')
   ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
@@ -109,30 +110,10 @@ const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'
 const freshMeals = () => DAYS.map((day) => ({ day, date: '', dinner: '', ingredients: [] }));
 
 const DARK_KEY = 'master_grocery_dark_v1';
-
-const isCustom = (item) => typeof item.id === 'string' && item.id.startsWith('custom_');
-const newCustomId = () => `custom_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+const newCustomId = () => `item_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 const cleanCategory = (c) => (CATEGORY_ORDER.includes(c) ? c : 'Other');
 const cleanStore = (s) => (STORES.includes(s) ? s : 'Walmart');
 const clampQty = (q) => Math.min(99, Math.max(1, Number.parseInt(q, 10) || 1));
-
-const mergeSaved = (saved) => {
-  const list = Array.isArray(saved) ? saved : [];
-  const savedById = new Map(list.filter((i) => i && i.id).map((i) => [i.id, i]));
-  const merged = INITIAL_ITEMS.map((d) => {
-    const s = savedById.get(d.id);
-    return s ? { ...d, needed: !!s.needed, qty: clampQty(s.qty) } : d;
-  });
-  const customs = list.filter((i) => i && i.name && isCustom(i)).map((i) => ({
-    id: i.id,
-    name: String(i.name),
-    category: cleanCategory(i.category),
-    defaultStore: cleanStore(i.defaultStore),
-    needed: !!i.needed,
-    qty: clampQty(i.qty),
-  }));
-  return [...customs, ...merged];
-};
 
 const normalizeMeals = (saved) => {
   const list = Array.isArray(saved) ? saved : [];
@@ -218,7 +199,7 @@ function PrintableList({ items }) {
 }
 
 export default function App() {
-  const [items, setItems] = useState(() => mergeSaved([]));
+  const [items, setItems] = useState([]);
   const [mealPlan, setMealPlan] = useState(() => normalizeMeals([]));
   const [syncStatus, setSyncStatus] = useState('connecting');
 
@@ -241,6 +222,7 @@ export default function App() {
 
   const [showPrintModal, setShowPrintModal] = useState(false);
   const [showAddItemModal, setShowAddItemModal] = useState(false);
+  const [editingItem, setEditingItem] = useState(null);
 
   const [newItemName, setNewItemName] = useState('');
   const [newItemCategory, setNewItemCategory] = useState('Other');
@@ -255,6 +237,7 @@ export default function App() {
   useEffect(() => {
     if (!supabase) {
       setSyncStatus('offline');
+      setItems(INITIAL_ITEMS);
       return;
     }
 
@@ -265,13 +248,27 @@ export default function App() {
         if (data && data.length > 0) {
           const listRow = data.find((r) => r.id === 'grocery_list');
           const mealRow = data.find((r) => r.id === 'meal_plan');
-          if (listRow) setItems(mergeSaved(listRow.data));
+          
+          if (listRow && Array.isArray(listRow.data) && listRow.data.length > 0) {
+            setItems(listRow.data);
+          } else {
+            setItems(INITIAL_ITEMS);
+            await supabase.from('app_state').upsert([{ id: 'grocery_list', data: INITIAL_ITEMS, updated_at: new Date() }]);
+          }
+
           if (mealRow) setMealPlan(normalizeMeals(mealRow.data));
+        } else {
+          setItems(INITIAL_ITEMS);
+          await supabase.from('app_state').upsert([
+            { id: 'grocery_list', data: INITIAL_ITEMS, updated_at: new Date() },
+            { id: 'meal_plan', data: freshMeals(), updated_at: new Date() },
+          ]);
         }
         setSyncStatus('synced');
       } catch (err) {
         console.error('Error loading from Supabase:', err);
         setSyncStatus('offline');
+        setItems(INITIAL_ITEMS);
       }
     };
 
@@ -281,7 +278,7 @@ export default function App() {
       .channel('public:app_state')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'app_state' }, (payload) => {
         if (payload.new) {
-          if (payload.new.id === 'grocery_list') setItems(mergeSaved(payload.new.data));
+          if (payload.new.id === 'grocery_list') setItems(payload.new.data || []);
           else if (payload.new.id === 'meal_plan') setMealPlan(normalizeMeals(payload.new.data));
         }
       })
@@ -346,7 +343,14 @@ export default function App() {
     setClearArmed(false);
   };
 
-  const deleteItem = (id) => updateItemsAndSync((prev) => prev.filter((i) => i.id !== id || !isCustom(i)));
+  const deleteItem = (id) => updateItemsAndSync((prev) => prev.filter((i) => i.id !== id));
+
+  const saveEditedItem = (e) => {
+    e.preventDefault();
+    if (!editingItem) return;
+    updateItemsAndSync((prev) => prev.map((i) => (i.id === editingItem.id ? editingItem : i)));
+    setEditingItem(null);
+  };
 
   const addNamesToCart = (names, fallbackCategory = 'Other', fallbackStore = 'Walmart') => {
     setItems((prev) => {
@@ -667,120 +671,4 @@ export default function App() {
                           )}
                         </button>
 
-                        {!isCollapsed && (
-                          <div className="p-3 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
-                            {groupItems.map((item) => (
-                              <div key={item.id} role="button" tabIndex={0} aria-pressed={item.needed} onClick={() => toggleNeeded(item.id)} onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleNeeded(item.id); } }} className={`p-3 rounded-2xl border transition flex items-center justify-between cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${item.needed ? 'bg-emerald-500/5 dark:bg-emerald-500/10 border-emerald-500/30 shadow-sm' : 'bg-slate-50/50 dark:bg-slate-800/30 border-slate-200 dark:border-slate-800/80 hover:border-slate-300 dark:hover:border-slate-700'}`}>
-                                <div className="flex items-center space-x-2.5 min-w-0">
-                                  <span aria-hidden="true" className={`w-5 h-5 rounded-lg flex items-center justify-center transition shrink-0 ${item.needed ? 'bg-emerald-500 text-white shadow-sm' : 'border-2 border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900'}`}>
-                                    {item.needed && <Check className="w-3.5 h-3.5 stroke-[3]" />}
-                                  </span>
-                                  <span className={`text-sm truncate ${item.needed ? 'text-emerald-900 dark:text-emerald-200 font-bold' : 'text-slate-700 dark:text-slate-300 font-semibold'}`}>
-                                    {item.name}
-                                  </span>
-                                </div>
-
-                                <div className="flex items-center space-x-2 shrink-0" onClick={(e) => e.stopPropagation()}>
-                                  <span className="text-xs font-bold px-2 py-0.5 rounded-lg bg-slate-200/60 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
-                                    {item.defaultStore}
-                                  </span>
-
-                                  {item.needed && (
-                                    <div className="flex items-center space-x-1 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-1.5 py-0.5">
-                                      <button type="button" onClick={() => updateQty(item.id, -1)} aria-label={`Decrease ${item.name} quantity`} className="w-5 h-5 rounded hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center text-sm font-bold text-slate-500">-</button>
-                                      <span className="text-xs font-bold px-1 text-emerald-700 dark:text-emerald-400" aria-label={`Quantity ${item.qty || 1}`}>{item.qty || 1}</span>
-                                      <button type="button" onClick={() => updateQty(item.id, 1)} aria-label={`Increase ${item.name} quantity`} className="w-5 h-5 rounded hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center text-sm font-bold text-slate-500">+</button>
-                                    </div>
-                                  )}
-
-                                  {isCustom(item) && (
-                                    <button type="button" onClick={() => deleteItem(item.id)} aria-label={`Delete ${item.name}`} className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-500/10">
-                                      <Trash2 className="w-4 h-4" />
-                                    </button>
-                                  )}
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </section>
-                    );
-                  })
-                )}
-              </div>
-            </div>
-          )}
-        </main>
-
-        {showAddItemModal && (
-          <Modal title="Add Custom Item" icon={Plus} onClose={() => setShowAddItemModal(false)}>
-            <form onSubmit={handleAddItem} className="space-y-4 text-xs">
-              <div>
-                <label htmlFor="new-item-name" className="block text-slate-600 dark:text-slate-400 font-medium mb-1">Item name</label>
-                <input id="new-item-name" type="text" required autoFocus value={newItemName} onChange={(e) => setNewItemName(e.target.value)} placeholder="e.g. Almond milk" className={fieldClass} />
-              </div>
-              <div>
-                <label htmlFor="new-item-category" className="block text-slate-600 dark:text-slate-400 font-medium mb-1">Category</label>
-                <select id="new-item-category" value={newItemCategory} onChange={(e) => setNewItemCategory(e.target.value)} className={`${fieldClass} cursor-pointer`}>
-                  {CATEGORY_ORDER.map((c) => <option key={c} value={c}>{c}</option>)}
-                </select>
-              </div>
-              <div>
-                <label htmlFor="new-item-store" className="block text-slate-600 dark:text-slate-400 font-medium mb-1">Preferred store</label>
-                <select id="new-item-store" value={newItemStore} onChange={(e) => setNewItemStore(e.target.value)} className={`${fieldClass} cursor-pointer`}>
-                  {STORES.map((s) => <option key={s} value={s}>{s}</option>)}
-                </select>
-              </div>
-              <div className="flex space-x-2 pt-2">
-                <button type="button" onClick={() => setShowAddItemModal(false)} className="w-1/2 py-2.5 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 rounded-xl font-semibold">Cancel</button>
-                <button type="submit" className="w-1/2 py-2.5 bg-emerald-500 hover:bg-emerald-600 text-white rounded-xl font-bold shadow-md shadow-emerald-500/20">Add to cart</button>
-              </div>
-            </form>
-          </Modal>
-        )}
-
-        {showPrintModal && (
-          <Modal title="Printable Shopping List (by store)" icon={Printer} wide onClose={() => setShowPrintModal(false)}>
-            <div className="space-y-4 text-xs">
-              <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-2xl flex items-center justify-between">
-                <div>
-                  <p className="font-bold text-sm text-slate-800 dark:text-slate-100">Items needed: {neededCount}</p>
-                  <p className="text-xs text-slate-500">Prints just this list, not the rest of the page.</p>
-                </div>
-                <div className="flex gap-2">
-                  <button type="button" onClick={copyListText} className="px-4 py-2 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-800 dark:text-slate-100 rounded-xl font-bold flex items-center space-x-1.5">
-                    {listCopyStatus === 'copied' ? <Check className="w-4 h-4" /> : null}
-                    <span>{listCopyStatus === 'copied' ? 'Copied' : 'Copy as text'}</span>
-                  </button>
-                  <button type="button" onClick={handlePrint} className="px-4 py-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-xl font-bold flex items-center space-x-1.5 shadow-md">
-                    <Printer className="w-4 h-4" />
-                    <span>Print Now</span>
-                  </button>
-                </div>
-              </div>
-              <textarea ref={listInputRef} readOnly aria-label="Shopping list as text" value={buildListText()} className="sr-only" />
-              <PrintableList items={items} />
-            </div>
-            <button type="button" onClick={() => setShowPrintModal(false)} className="w-full py-2.5 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 rounded-xl font-semibold text-xs">Close</button>
-          </Modal>
-        )}
-      </div>
-
-      <div className="hidden print:block p-6 bg-white text-black">
-        <h1 className="text-xl font-extrabold mb-1">Shopping List</h1>
-        <p className="text-sm mb-4">{new Date().toLocaleDateString()}</p>
-        <PrintableList items={items} />
-        {plannedMeals.length > 0 && (
-          <div className="mt-6">
-            <h2 className="text-base font-bold mb-2">Dinners this week</h2>
-            <ul className="text-sm space-y-1">
-              {plannedMeals.map((s) => (
-                <li key={s.day}><strong>{s.day}:</strong> {s.dinner}</li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
+                        {!isCollapsed
