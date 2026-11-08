@@ -27,8 +27,8 @@ import {
 /* SUPABASE CONFIG (PASTE YOUR CREDENTIALS HERE)                       */
 /* ------------------------------------------------------------------ */
 
-const SUPABASE_URL = 'YOUR_SUPABASE_URL_HERE';
-const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY_HERE';
+const SUPABASE_URL = 'https://cyxyvcdjguslfhvcklhj.supabase.co';
+const SUPABASE_ANON_KEY = 'cyxyvcdjguslfhvcklhj';
 
 const supabase = (SUPABASE_URL && SUPABASE_URL !== 'YOUR_SUPABASE_URL_HERE')
   ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
