@@ -27,8 +27,8 @@ import {
 /* SUPABASE CONFIG (PASTE YOUR CREDENTIALS HERE)                       */
 /* ------------------------------------------------------------------ */
 
-const SUPABASE_URL = 'https://cyxyvcdjguslfhvcklhj.supabase.co';
-const SUPABASE_ANON_KEY = 'cyxyvcdjguslfhvcklhj';
+const SUPABASE_URL = 'https://cyxyvcdjguslfhvcklhj.supabase.co/rest/v1/';
+const SUPABASE_ANON_KEY = 'sb_publishable_4-gVdxwK6eBhszY5az-n7w_fiqjPEx7';
 
 const supabase = (SUPABASE_URL && SUPABASE_URL !== 'YOUR_SUPABASE_URL_HERE')
   ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
