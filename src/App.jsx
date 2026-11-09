@@ -1,6 +1,23 @@
 import React, { useState, useEffect, useMemo, useRef, useId } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  arrayMove,
+  sortableKeyboardCoordinates,
+  useSortable,
+  rectSortingStrategy,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import {
   ShoppingBag,
   Calendar,
   Plus,
@@ -22,12 +39,13 @@ import {
   Cloud,
   CloudOff,
   Pencil,
+  GripVertical,
 } from 'lucide-react';
 
 const SUPABASE_URL = 'https://cyxyvcdjguslfhvcklhj.supabase.co';
 const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY_HERE';
 
-const supabase = (SUPABASE_URL && SUPABASE_URL !== 'YOUR_SUPABASE_ANON_KEY_HERE')
+const supabase = (SUPABASE_URL && SUPABASE_ANON_KEY && SUPABASE_ANON_KEY !== 'YOUR_SUPABASE_ANON_KEY_HERE')
   ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
   : null;
 
@@ -115,6 +133,30 @@ const cleanCategory = (c) => (CATEGORY_ORDER.includes(c) ? c : 'Other');
 const cleanStore = (s) => (STORES.includes(s) ? s : 'Walmart');
 const clampQty = (q) => Math.min(99, Math.max(1, Number.parseInt(q, 10) || 1));
 
+// Saved category/store order, tolerant of missing, duplicate or unknown entries.
+const normalizeOrder = (saved, defaults) => {
+  const valid = Array.isArray(saved)
+    ? saved.filter((x, i) => typeof x === 'string' && defaults.includes(x) && saved.indexOf(x) === i)
+    : [];
+  return [...valid, ...defaults.filter((d) => !valid.includes(d))];
+};
+
+// Moves one entry within a visible subset (filtered/searched list) while keeping everything
+// hidden by the filter exactly where it was in the full list.
+const reorderSubset = (full, subsetIds, activeId, overId, getId = (x) => x) => {
+  const from = subsetIds.indexOf(activeId);
+  const to = subsetIds.indexOf(overId);
+  if (from < 0 || to < 0 || from === to) return full;
+  const moved = arrayMove(subsetIds, from, to);
+  const byId = new Map(full.map((x) => [getId(x), x]));
+  const inSubset = new Set(subsetIds);
+  const slots = [];
+  full.forEach((x, i) => { if (inSubset.has(getId(x))) slots.push(i); });
+  const next = [...full];
+  slots.forEach((slot, k) => { next[slot] = byId.get(moved[k]); });
+  return next;
+};
+
 const normalizeMeals = (saved) => {
   const list = Array.isArray(saved) ? saved : [];
   return freshMeals().map((base) => {
@@ -165,8 +207,8 @@ function Modal({ title, icon: Icon, onClose, wide, children }) {
   );
 }
 
-function PrintableList({ items }) {
-  const storeNames = [...STORES, ...new Set(items.map((i) => i.defaultStore).filter((s) => !STORES.includes(s)))];
+function PrintableList({ items, stores = STORES }) {
+  const storeNames = [...stores, ...new Set(items.map((i) => i.defaultStore).filter((s) => !stores.includes(s)))];
   const groups = storeNames.map((name) => [name, items.filter((i) => i.needed && i.defaultStore === name)]).filter(([, list]) => list.length > 0);
 
   if (groups.length === 0) {
@@ -198,10 +240,128 @@ function PrintableList({ items }) {
   );
 }
 
+function GroupCard({ id, name, count, neededCount, isCollapsed, onToggle, children }) {
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({ id });
+  const style = {
+    transform: CSS.Translate.toString(transform),
+    transition,
+    zIndex: isDragging ? 20 : undefined,
+    opacity: isDragging ? 0.9 : 1,
+  };
+  return (
+    <section ref={setNodeRef} style={style} className={`relative bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl overflow-hidden shadow-sm ${isDragging ? 'ring-2 ring-emerald-500' : ''}`}>
+      <div className="flex items-stretch bg-slate-50 dark:bg-slate-800/80 border-b border-slate-100 dark:border-slate-800">
+        <button type="button" ref={setActivatorNodeRef} {...attributes} {...listeners} aria-label={`Drag to reorder ${name}`} className="pl-4 pr-1 touch-none cursor-grab active:cursor-grabbing text-slate-400 hover:text-emerald-600">
+          <GripVertical className="w-4 h-4" />
+        </button>
+        <button type="button" aria-expanded={!isCollapsed} onClick={onToggle} className="flex-1 text-left pl-2 pr-5 py-3.5 flex items-center justify-between hover:bg-slate-100 dark:hover:bg-slate-800 transition">
+          <span className="flex items-center space-x-2.5">
+            {isCollapsed ? <ChevronRight className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-emerald-500" />}
+            <span className="font-extrabold text-xs tracking-wider text-slate-800 dark:text-slate-200">{name}</span>
+            <span className="px-2 py-0.5 bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300 font-bold text-xs rounded-full">{count}</span>
+          </span>
+          {neededCount > 0 && (
+            <span className="px-2.5 py-0.5 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 font-bold text-xs rounded-full border border-emerald-500/20">
+              {neededCount} needed
+            </span>
+          )}
+        </button>
+      </div>
+      {!isCollapsed && children}
+    </section>
+  );
+}
+
+function SortableItemGrid({ ids, onReorder, children }) {
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+  return (
+    <DndContext
+      sensors={sensors}
+      collisionDetection={closestCenter}
+      onDragEnd={({ active, over }) => {
+        if (over && active.id !== over.id) onReorder(active.id, over.id, ids);
+      }}
+    >
+      <SortableContext items={ids} strategy={rectSortingStrategy}>
+        <div className="p-3 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">{children}</div>
+      </SortableContext>
+    </DndContext>
+  );
+}
+
+function ItemRow({ item, dragEnabled, onToggle, onQty, onEdit, onDelete }) {
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({
+    id: item.id,
+    disabled: !dragEnabled,
+  });
+  const style = {
+    transform: CSS.Translate.toString(transform),
+    transition,
+    zIndex: isDragging ? 20 : undefined,
+    opacity: isDragging ? 0.9 : 1,
+  };
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      role="button"
+      tabIndex={0}
+      aria-pressed={item.needed}
+      onClick={() => onToggle(item.id)}
+      onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return;
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(item.id); }
+      }}
+      className={`relative p-3 rounded-2xl border transition flex items-center justify-between cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${isDragging ? 'ring-2 ring-emerald-500 shadow-lg' : ''} ${item.needed ? 'bg-emerald-500/5 dark:bg-emerald-500/10 border-emerald-500/30 shadow-sm' : 'bg-slate-50/50 dark:bg-slate-800/30 border-slate-200 dark:border-slate-800/80 hover:border-slate-300 dark:hover:border-slate-700'}`}
+    >
+      <div className="flex items-center space-x-2 min-w-0">
+        {dragEnabled && (
+          <button type="button" ref={setActivatorNodeRef} {...attributes} {...listeners} onClick={(e) => e.stopPropagation()} aria-label={`Drag to reorder ${item.name}`} className="-ml-1 p-0.5 shrink-0 touch-none cursor-grab active:cursor-grabbing text-slate-400 hover:text-emerald-600">
+            <GripVertical className="w-4 h-4" />
+          </button>
+        )}
+        <span aria-hidden="true" className={`w-5 h-5 rounded-lg flex items-center justify-center transition shrink-0 ${item.needed ? 'bg-emerald-500 text-white shadow-sm' : 'border-2 border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900'}`}>
+          {item.needed && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+        </span>
+        <span className={`text-sm truncate ${item.needed ? 'text-emerald-900 dark:text-emerald-200 font-bold' : 'text-slate-700 dark:text-slate-300 font-semibold'}`}>
+          {item.name}
+        </span>
+      </div>
+
+      <div className="flex items-center space-x-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+        <span className="text-xs font-bold px-2 py-0.5 rounded-lg bg-slate-200/60 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
+          {item.defaultStore}
+        </span>
+
+        {item.needed && (
+          <div className="flex items-center space-x-1 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-1.5 py-0.5">
+            <button type="button" onClick={() => onQty(item.id, -1)} aria-label={`Decrease ${item.name} quantity`} className="w-5 h-5 rounded hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center text-sm font-bold text-slate-500">-</button>
+            <span className="text-xs font-bold px-1 text-emerald-700 dark:text-emerald-400" aria-label={`Quantity ${item.qty || 1}`}>{item.qty || 1}</span>
+            <button type="button" onClick={() => onQty(item.id, 1)} aria-label={`Increase ${item.name} quantity`} className="w-5 h-5 rounded hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center text-sm font-bold text-slate-500">+</button>
+          </div>
+        )}
+
+        <button type="button" onClick={() => onEdit(item)} aria-label={`Edit ${item.name}`} className="p-1 rounded-lg text-slate-400 hover:text-emerald-600 hover:bg-emerald-500/10">
+          <Pencil className="w-3.5 h-3.5" />
+        </button>
+
+        <button type="button" onClick={() => onDelete(item.id)} aria-label={`Delete ${item.name}`} className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-500/10">
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [items, setItems] = useState([]);
   const [mealPlan, setMealPlan] = useState(() => normalizeMeals([]));
   const [syncStatus, setSyncStatus] = useState('connecting');
+  const [categoryOrder, setCategoryOrder] = useState(CATEGORY_ORDER);
+  const [storeOrder, setStoreOrder] = useState(STORES);
 
   const [darkMode, setDarkMode] = useState(() => {
     try {
@@ -234,36 +394,69 @@ export default function App() {
   const [drafts, setDrafts] = useState({});
   const [flashDay, setFlashDay] = useState(null);
 
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  const mealsRef = useRef(mealPlan);
+  mealsRef.current = mealPlan;
+  const lastLocalWrite = useRef({});
+  const saveTimers = useRef({});
+
+  const groupSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
+  // Saves one row of app_state shortly after the last change (coalesces rapid taps and drags).
+  const persist = (id, data) => {
+    if (!supabase) return;
+    lastLocalWrite.current[id] = Date.now();
+    clearTimeout(saveTimers.current[id]);
+    saveTimers.current[id] = setTimeout(async () => {
+      try {
+        const { error } = await supabase.from('app_state').upsert([{ id, data, updated_at: new Date().toISOString() }]);
+        if (error) throw error;
+        setSyncStatus('synced');
+      } catch (err) {
+        console.error('Error saving to Supabase:', err);
+        setSyncStatus('offline');
+      } finally {
+        lastLocalWrite.current[id] = Date.now();
+      }
+    }, 300);
+  };
+
   useEffect(() => {
     if (!supabase) {
       setSyncStatus('offline');
       setItems(INITIAL_ITEMS);
-      return;
+      return undefined;
     }
 
     const loadData = async () => {
       try {
         const { data, error } = await supabase.from('app_state').select('*');
         if (error) throw error;
-        if (data && data.length > 0) {
-          const listRow = data.find((r) => r.id === 'grocery_list');
-          const mealRow = data.find((r) => r.id === 'meal_plan');
-          
-          if (listRow && Array.isArray(listRow.data) && listRow.data.length > 0) {
-            setItems(listRow.data);
-          } else {
-            setItems(INITIAL_ITEMS);
-            await supabase.from('app_state').upsert([{ id: 'grocery_list', data: INITIAL_ITEMS, updated_at: new Date() }]);
-          }
+        const rows = data || [];
+        const listRow = rows.find((r) => r.id === 'grocery_list');
+        const mealRow = rows.find((r) => r.id === 'meal_plan');
+        const catRow = rows.find((r) => r.id === 'category_order');
+        const storeRow = rows.find((r) => r.id === 'store_order');
 
-          if (mealRow) setMealPlan(normalizeMeals(mealRow.data));
+        if (listRow && Array.isArray(listRow.data) && listRow.data.length > 0) {
+          setItems(listRow.data);
         } else {
           setItems(INITIAL_ITEMS);
-          await supabase.from('app_state').upsert([
-            { id: 'grocery_list', data: INITIAL_ITEMS, updated_at: new Date() },
-            { id: 'meal_plan', data: freshMeals(), updated_at: new Date() },
-          ]);
+          await supabase.from('app_state').upsert([{ id: 'grocery_list', data: INITIAL_ITEMS, updated_at: new Date().toISOString() }]);
         }
+
+        if (mealRow) {
+          setMealPlan(normalizeMeals(mealRow.data));
+        } else {
+          await supabase.from('app_state').upsert([{ id: 'meal_plan', data: freshMeals(), updated_at: new Date().toISOString() }]);
+        }
+
+        if (catRow) setCategoryOrder(normalizeOrder(catRow.data, CATEGORY_ORDER));
+        if (storeRow) setStoreOrder(normalizeOrder(storeRow.data, STORES));
         setSyncStatus('synced');
       } catch (err) {
         console.error('Error loading from Supabase:', err);
@@ -274,14 +467,28 @@ export default function App() {
 
     loadData();
 
+    // Ignore the echo of our own recent saves so a late echo can't undo a newer drag.
+    const applyRemote = (row) => {
+      if (!row) return;
+      if (Date.now() - (lastLocalWrite.current[row.id] || 0) < 2500) return;
+      if (row.id === 'grocery_list') {
+        const next = Array.isArray(row.data) ? row.data : [];
+        itemsRef.current = next;
+        setItems(next);
+      } else if (row.id === 'meal_plan') {
+        const next = normalizeMeals(row.data);
+        mealsRef.current = next;
+        setMealPlan(next);
+      } else if (row.id === 'category_order') {
+        setCategoryOrder(normalizeOrder(row.data, CATEGORY_ORDER));
+      } else if (row.id === 'store_order') {
+        setStoreOrder(normalizeOrder(row.data, STORES));
+      }
+    };
+
     const channel = supabase
       .channel('public:app_state')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'app_state' }, (payload) => {
-        if (payload.new) {
-          if (payload.new.id === 'grocery_list') setItems(payload.new.data || []);
-          else if (payload.new.id === 'meal_plan') setMealPlan(normalizeMeals(payload.new.data));
-        }
-      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'app_state' }, (payload) => applyRemote(payload.new))
       .subscribe();
 
     return () => {
@@ -289,34 +496,18 @@ export default function App() {
     };
   }, []);
 
-  const saveData = async (newItems, newMeals) => {
-    if (!supabase) return;
-    try {
-      await supabase.from('app_state').upsert([
-        { id: 'grocery_list', data: newItems, updated_at: new Date() },
-        { id: 'meal_plan', data: newMeals, updated_at: new Date() },
-      ]);
-      setSyncStatus('synced');
-    } catch (err) {
-      console.error('Error saving to Supabase:', err);
-      setSyncStatus('offline');
-    }
-  };
-
   const updateItemsAndSync = (updater) => {
-    setItems((prev) => {
-      const next = typeof updater === 'function' ? updater(prev) : updater;
-      saveData(next, mealPlan);
-      return next;
-    });
+    const next = typeof updater === 'function' ? updater(itemsRef.current) : updater;
+    itemsRef.current = next;
+    setItems(next);
+    persist('grocery_list', next);
   };
 
   const updateMealsAndSync = (updater) => {
-    setMealPlan((prev) => {
-      const next = typeof updater === 'function' ? updater(prev) : updater;
-      saveData(items, next);
-      return next;
-    });
+    const next = typeof updater === 'function' ? updater(mealsRef.current) : updater;
+    mealsRef.current = next;
+    setMealPlan(next);
+    persist('meal_plan', next);
   };
 
   useEffect(() => {
@@ -352,8 +543,30 @@ export default function App() {
     setEditingItem(null);
   };
 
-  const addNamesToCart = (names, fallbackCategory = 'Other', fallbackStore = 'Walmart') => {
-    setItems((prev) => {
+  const reorderItems = (activeId, overId, subsetIds) =>
+    updateItemsAndSync((prev) => reorderSubset(prev, subsetIds, activeId, overId, (i) => i.id));
+
+  const reorderGroups = (activeKey, overKey) => {
+    const visible = orderedGroups.map(([key]) => key);
+    const isCategory = viewMode === 'category';
+    const current = isCategory ? categoryOrder : storeOrder;
+    const base = [...current, ...visible.filter((k) => !current.includes(k))];
+    const next = reorderSubset(base, visible, activeKey, overKey);
+    if (isCategory) {
+      setCategoryOrder(next);
+      persist('category_order', next);
+    } else {
+      setStoreOrder(next);
+      persist('store_order', next);
+    }
+  };
+
+  const handleGroupDragEnd = ({ active, over }) => {
+    if (over && active.id !== over.id) reorderGroups(active.id, over.id);
+  };
+
+  const addNamesToCart = (names, fallbackCategory = 'Other', fallbackStore = 'Walmart') =>
+    updateItemsAndSync((prev) => {
       const next = [...prev];
       const created = [];
       names.forEach((raw) => {
@@ -366,11 +579,8 @@ export default function App() {
           created.push({ id: newCustomId(), name, category: fallbackCategory, defaultStore: fallbackStore, needed: true, qty: 1 });
         }
       });
-      const combined = [...created, ...next];
-      saveData(combined, mealPlan);
-      return combined;
+      return [...created, ...next];
     });
-  };
 
   const handleAddItem = (e) => {
     e.preventDefault();
@@ -404,7 +614,7 @@ export default function App() {
   const listInputRef = useRef(null);
 
   const buildListText = () => {
-    const names = [...STORES, ...new Set(items.map((i) => i.defaultStore).filter((s) => !STORES.includes(s)))];
+    const names = [...storeOrder, ...new Set(items.map((i) => i.defaultStore).filter((s) => !storeOrder.includes(s)))];
     return names.map((name) => [name, items.filter((i) => i.needed && i.defaultStore === name)]).filter(([, list]) => list.length > 0).map(([name, list]) => `${name}\n${list.map((i) => `[ ] ${i.name}${(i.qty || 1) > 1 ? ` x${i.qty}` : ''}`).join('\n')}`).join('\n\n');
   };
 
@@ -459,10 +669,10 @@ export default function App() {
       const key = viewMode === 'category' ? item.category : item.defaultStore;
       (groups[key] = groups[key] || []).push(item);
     });
-    const order = viewMode === 'category' ? CATEGORY_ORDER : STORES;
+    const order = viewMode === 'category' ? categoryOrder : storeOrder;
     const keys = [...order.filter((k) => groups[k]), ...Object.keys(groups).filter((k) => !order.includes(k))];
     return keys.map((k) => [k, sortBy === 'alphabetical' ? [...groups[k]].sort((a, b) => a.name.localeCompare(b.name)) : groups[k]]);
-  }, [filteredItems, viewMode, sortBy]);
+  }, [filteredItems, viewMode, sortBy, categoryOrder, storeOrder]);
 
   const neededCount = useMemo(() => items.filter((i) => i.needed).length, [items]);
   const plannedMeals = mealPlan.filter((s) => s.dinner.trim());
@@ -619,7 +829,7 @@ export default function App() {
 
                     <button type="button" onClick={() => setSortBy((s) => (s === 'default' ? 'alphabetical' : 'default'))} className={`px-3 py-2 rounded-2xl text-xs font-semibold flex items-center space-x-1.5 transition ${sortBy === 'alphabetical' ? 'bg-emerald-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200'}`}>
                       <ArrowUpDown className="w-3.5 h-3.5" />
-                      <span>{sortBy === 'alphabetical' ? 'Sorted A–Z' : 'Default Order'}</span>
+                      <span>{sortBy === 'alphabetical' ? 'Sorted A–Z' : 'My Order'}</span>
                     </button>
 
                     <button type="button" onClick={() => setShowAddItemModal(true)} className="px-3.5 py-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-2xl text-xs font-bold flex items-center space-x-1.5 shadow-md shadow-emerald-500/20 transition">
@@ -637,83 +847,57 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="space-y-4">
-                {orderedGroups.length === 0 ? (
-                  <div className="text-center py-16 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl space-y-3">
-                    <div className="w-12 h-12 bg-slate-100 dark:bg-slate-800 rounded-full flex items-center justify-center mx-auto text-slate-400">
-                      <ShoppingBag className="w-6 h-6" />
-                    </div>
-                    <h3 className="font-bold text-sm text-slate-700 dark:text-slate-300">
-                      {activeTab === 'needed' && !searchQuery && selectedStore === 'All' ? 'Your cart is empty' : 'No items found'}
-                    </h3>
-                    <p className="text-xs text-slate-500">
-                      {activeTab === 'needed' && !searchQuery && selectedStore === 'All' ? 'Tap items on the Master List to add them here.' : 'Try adjusting your search or filters.'}
-                    </p>
-                  </div>
-                ) : (
-                  orderedGroups.map(([groupName, groupItems]) => {
-                    const isCollapsed = collapsed[groupName];
-                    const neededInGroup = groupItems.filter((i) => i.needed).length;
-                    return (
-                      <section key={groupName} className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl overflow-hidden shadow-sm">
-                        <button type="button" aria-expanded={!isCollapsed} onClick={() => setCollapsed((prev) => ({ ...prev, [groupName]: !prev[groupName] }))} className="w-full text-left px-5 py-3.5 bg-slate-50 dark:bg-slate-800/80 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between hover:bg-slate-100 dark:hover:bg-slate-800 transition">
-                          <span className="flex items-center space-x-2.5">
-                            {isCollapsed ? <ChevronRight className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-emerald-500" />}
-                            <span className="font-extrabold text-xs tracking-wider text-slate-800 dark:text-slate-200">{groupName}</span>
-                            <span className="px-2 py-0.5 bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300 font-bold text-xs rounded-full">
-                              {groupItems.length}
-                            </span>
-                          </span>
-                          {neededInGroup > 0 && (
-                            <span className="px-2.5 py-0.5 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 font-bold text-xs rounded-full border border-emerald-500/20">
-                              {neededInGroup} needed
-                            </span>
-                          )}
-                        </button>
+              {sortBy === 'alphabetical' && orderedGroups.length > 0 && (
+                <p className="text-xs text-slate-500 dark:text-slate-400 px-1">
+                  Items are sorted A–Z. Switch back to &quot;My Order&quot; to drag items. Groups can still be dragged.
+                </p>
+              )}
 
-                        {!isCollapsed && (
-                          <div className="p-3 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+              <DndContext sensors={groupSensors} collisionDetection={closestCenter} onDragEnd={handleGroupDragEnd}>
+                <SortableContext items={orderedGroups.map(([key]) => key)} strategy={verticalListSortingStrategy}>
+                  <div className="space-y-4">
+                    {orderedGroups.length === 0 ? (
+                      <div className="text-center py-16 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl space-y-3">
+                        <div className="w-12 h-12 bg-slate-100 dark:bg-slate-800 rounded-full flex items-center justify-center mx-auto text-slate-400">
+                          <ShoppingBag className="w-6 h-6" />
+                        </div>
+                        <h3 className="font-bold text-sm text-slate-700 dark:text-slate-300">
+                          {activeTab === 'needed' && !searchQuery && selectedStore === 'All' ? 'Your cart is empty' : 'No items found'}
+                        </h3>
+                        <p className="text-xs text-slate-500">
+                          {activeTab === 'needed' && !searchQuery && selectedStore === 'All' ? 'Tap items on the Master List to add them here.' : 'Try adjusting your search or filters.'}
+                        </p>
+                      </div>
+                    ) : (
+                      orderedGroups.map(([groupName, groupItems]) => (
+                        <GroupCard
+                          key={groupName}
+                          id={groupName}
+                          name={groupName}
+                          count={groupItems.length}
+                          neededCount={groupItems.filter((i) => i.needed).length}
+                          isCollapsed={!!collapsed[groupName]}
+                          onToggle={() => setCollapsed((prev) => ({ ...prev, [groupName]: !prev[groupName] }))}
+                        >
+                          <SortableItemGrid ids={groupItems.map((i) => i.id)} onReorder={reorderItems}>
                             {groupItems.map((item) => (
-                              <div key={item.id} role="button" tabIndex={0} aria-pressed={item.needed} onClick={() => toggleNeeded(item.id)} onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleNeeded(item.id); } }} className={`p-3 rounded-2xl border transition flex items-center justify-between cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${item.needed ? 'bg-emerald-500/5 dark:bg-emerald-500/10 border-emerald-500/30 shadow-sm' : 'bg-slate-50/50 dark:bg-slate-800/30 border-slate-200 dark:border-slate-800/80 hover:border-slate-300 dark:hover:border-slate-700'}`}>
-                                <div className="flex items-center space-x-2.5 min-w-0">
-                                  <span aria-hidden="true" className={`w-5 h-5 rounded-lg flex items-center justify-center transition shrink-0 ${item.needed ? 'bg-emerald-500 text-white shadow-sm' : 'border-2 border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900'}`}>
-                                    {item.needed && <Check className="w-3.5 h-3.5 stroke-[3]" />}
-                                  </span>
-                                  <span className={`text-sm truncate ${item.needed ? 'text-emerald-900 dark:text-emerald-200 font-bold' : 'text-slate-700 dark:text-slate-300 font-semibold'}`}>
-                                    {item.name}
-                                  </span>
-                                </div>
-
-                                <div className="flex items-center space-x-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
-                                  <span className="text-xs font-bold px-2 py-0.5 rounded-lg bg-slate-200/60 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
-                                    {item.defaultStore}
-                                  </span>
-
-                                  {item.needed && (
-                                    <div className="flex items-center space-x-1 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-1.5 py-0.5">
-                                      <button type="button" onClick={() => updateQty(item.id, -1)} aria-label={`Decrease ${item.name} quantity`} className="w-5 h-5 rounded hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center text-sm font-bold text-slate-500">-</button>
-                                      <span className="text-xs font-bold px-1 text-emerald-700 dark:text-emerald-400" aria-label={`Quantity ${item.qty || 1}`}>{item.qty || 1}</span>
-                                      <button type="button" onClick={() => updateQty(item.id, 1)} aria-label={`Increase ${item.name} quantity`} className="w-5 h-5 rounded hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center text-sm font-bold text-slate-500">+</button>
-                                    </div>
-                                  )}
-
-                                  <button type="button" onClick={() => setEditingItem(item)} aria-label={`Edit ${item.name}`} className="p-1 rounded-lg text-slate-400 hover:text-emerald-600 hover:bg-emerald-500/10">
-                                    <Pencil className="w-3.5 h-3.5" />
-                                  </button>
-
-                                  <button type="button" onClick={() => deleteItem(item.id)} aria-label={`Delete ${item.name}`} className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-500/10">
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </button>
-                                </div>
-                              </div>
+                              <ItemRow
+                                key={item.id}
+                                item={item}
+                                dragEnabled={sortBy === 'default'}
+                                onToggle={toggleNeeded}
+                                onQty={updateQty}
+                                onEdit={setEditingItem}
+                                onDelete={deleteItem}
+                              />
                             ))}
-                          </div>
-                        )}
-                      </section>
-                    );
-                  })
-                )}
-              </div>
+                          </SortableItemGrid>
+                        </GroupCard>
+                      ))
+                    )}
+                  </div>
+                </SortableContext>
+              </DndContext>
             </div>
           )}
         </main>
@@ -792,7 +976,7 @@ export default function App() {
                 </div>
               </div>
               <textarea ref={listInputRef} readOnly aria-label="Shopping list as text" value={buildListText()} className="sr-only" />
-              <PrintableList items={items} />
+              <PrintableList items={items} stores={storeOrder} />
             </div>
             <button type="button" onClick={() => setShowPrintModal(false)} className="w-full py-2.5 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 rounded-xl font-semibold text-xs">Close</button>
           </Modal>
@@ -802,7 +986,7 @@ export default function App() {
       <div className="hidden print:block p-6 bg-white text-black">
         <h1 className="text-xl font-extrabold mb-1">Shopping List</h1>
         <p className="text-sm mb-4">{new Date().toLocaleDateString()}</p>
-        <PrintableList items={items} />
+        <PrintableList items={items} stores={storeOrder} />
         {plannedMeals.length > 0 && (
           <div className="mt-6">
             <h2 className="text-base font-bold mb-2">Dinners this week</h2>
@@ -817,3 +1001,4 @@ export default function App() {
     </div>
   );
 }
+ 
