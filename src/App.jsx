@@ -43,9 +43,9 @@ import {
 } from 'lucide-react';
 
 const SUPABASE_URL = 'https://cyxyvcdjguslfhvcklhj.supabase.co';
-const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY_HERE';
+const SUPABASE_ANON_KEY = 'sb_publishable_4-gVdxwK6eBhszY5az-n7w_fiqjPEx7';
 
-const supabase = (SUPABASE_URL && SUPABASE_ANON_KEY && SUPABASE_ANON_KEY !== 'YOUR_SUPABASE_ANON_KEY_HERE')
+const supabase = (SUPABASE_URL && SUPABASE_ANON_KEY && SUPABASE_ANON_KEY !== 'sb_publishable_4-gVdxwK6eBhszY5az-n7w_fiqjPEx7')
   ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
   : null;
 
