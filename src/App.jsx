@@ -45,7 +45,7 @@ import {
 const SUPABASE_URL = 'https://cyxyvcdjguslfhvcklhj.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_4-gVdxwK6eBhszY5az-n7w_fiqjPEx7';
 
-const supabase = (SUPABASE_URL && SUPABASE_ANON_KEY && SUPABASE_ANON_KEY !== 'sb_publishable_4-gVdxwK6eBhszY5az-n7w_fiqjPEx7')
+const supabase = (SUPABASE_URL && SUPABASE_ANON_KEY)
   ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
   : null;
 
